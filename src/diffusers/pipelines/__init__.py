@@ -51,6 +51,7 @@ else:
         StableDiffusionImg2ImgPipeline,
         StableDiffusionInpaintPipeline,
         StableDiffusionInpaintPipelineLegacy,
+        StableDiffusionPosteriorPipeline,
         StableDiffusionInstructPix2PixPipeline,
         StableDiffusionPipeline,
         StableDiffusionUpscalePipeline,
