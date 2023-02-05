@@ -483,19 +483,27 @@ class StableDiffusionPosteriorPipeline(DiffusionPipeline):
         latents = init_latents
         return latents, init_latents_orig, noise
 
-    def mix_image(self, input_latent, predicted_latent, match_high_frequency=False):
+    def mix_image(self, input_latent, predicted_latent, match_weight=1, match_high_frequency=False):
         input_lf, input_hf = self.xfm(input_latent)
         predicted_lf, predicted_hf = self.xfm(predicted_latent)
         if match_high_frequency:
-            return self.ifm((predicted_lf, input_hf))
+            if match_weight < 1:
+                hf = [ihf * match_weight + phf * (1-match_weight) for ihf, phf in zip(input_hf, predicted_hf)]
+            else: hf = input_hf
+            return self.ifm((predicted_lf, hf))
         else:
-            return self.ifm((input_lf, predicted_hf))
+            if match_weight < 1:
+                lf = input_lf * match_weight + predicted_lf * (1-match_weight)
+            else:
+                lf = input_lf
+            return self.ifm((lf, predicted_hf))
 
     @torch.no_grad()
     def __call__(
         self,
         prompt: Union[str, List[str]],
         image: Union[torch.FloatTensor, PIL.Image.Image] = None,
+        image_to_match = None,
         strength: float = 0.8,
         num_inference_steps: Optional[int] = 50,
         guidance_scale: Optional[float] = 7.5,
@@ -511,6 +519,8 @@ class StableDiffusionPosteriorPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         wavelet_level: Optional[int] = 1,
+        fill_with_zeros = False,
+        match_weight=1,
         match_high_frequency=False,
         **kwargs,
     ):
@@ -612,6 +622,9 @@ class StableDiffusionPosteriorPipeline(DiffusionPipeline):
         # 4. Preprocess image and mask
         if not isinstance(image, torch.FloatTensor):
             image = preprocess_image(image)
+        
+        if image_to_match is not None and not isinstance(image_to_match, torch.FloatTensor):
+            image_to_match = preprocess_image(image_to_match)
 
         # 5. set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -622,6 +635,10 @@ class StableDiffusionPosteriorPipeline(DiffusionPipeline):
         # encode the init image into latents and scale the latents
         latents, init_latents_orig, noise = self.prepare_latents(
             image, latent_timestep, batch_size, num_images_per_prompt, prompt_embeds.dtype, device, generator
+        )
+        if image_to_match is not None:
+            _, init_latents_orig, _ = self.prepare_latents(
+                image_to_match, latent_timestep, batch_size, num_images_per_prompt, prompt_embeds.dtype, device, generator
         )
 
         # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -653,7 +670,10 @@ class StableDiffusionPosteriorPipeline(DiffusionPipeline):
                 else:
                     init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, torch.tensor([t]))
 
-                latents = self.mix_image(init_latents_orig, latents, match_high_frequency)
+                if fill_with_zeros:
+                    latents = torch.zeros_like(latents)
+                latents = self.mix_image(init_latents_orig, latents,
+                                         match_weight=match_weight, match_high_frequency=match_high_frequency)
                 # latents = (init_latents_proper * mask) + (latents * (1 - mask))
 
                 # call the callback, if provided
@@ -663,7 +683,10 @@ class StableDiffusionPosteriorPipeline(DiffusionPipeline):
                         callback(i, t, latents)
 
         # use original latents corresponding to unmasked portions of the image
-        latents = self.mix_image(init_latents_orig, latents, match_high_frequency)
+        if fill_with_zeros:
+            latents = torch.zeros_like(latents)
+        latents = self.mix_image(init_latents_orig, latents,
+                                 match_weight=match_weight, match_high_frequency=match_high_frequency)
         # latents = (init_latents_orig * mask) + (latents * (1 - mask))
 
         # 10. Post-processing
